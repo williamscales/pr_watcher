@@ -1,0 +1,19 @@
+[project]
+name = "pr-watcher"
+version = "0.1.0"
+description = "TUI that polls GitHub for PRs to review and spawns Claude Code sessions in kitty tabs"
+readme = "README.md"
+authors = [
+    { name = "Will Scales", email = "will@withglide.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "textual>=8.0,<9.0",
+]
+
+[project.scripts]
+pr-watcher = "pr_watcher.app:main"
+
+[build-system]
+requires = ["uv_build>=0.10.12,<0.11.0"]
+build-backend = "uv_build"
