@@ -68,6 +68,11 @@ async def find_pr_tab(pr_number: int) -> dict | None:
     return None
 
 
+def _window_id(tab: dict) -> int | None:
+    windows = tab.get("windows", [])
+    return windows[0]["id"] if windows else None
+
+
 def is_claude_running(tab: dict) -> bool:
     for window in tab.get("windows", []):
         for proc in window.get("foreground_processes", []):
@@ -78,9 +83,15 @@ def is_claude_running(tab: dict) -> bool:
 
 
 async def focus_tab(pr_number: int) -> bool:
+    tab = await find_pr_tab(pr_number)
+    if tab is None:
+        log.error("No tab found for PR #%d", pr_number)
+        return False
+    wid = _window_id(tab)
+    if wid is None:
+        return False
     rc, _, err = await run_cmd(
-        *_base_cmd(), "focus-tab",
-        "--match", f"title:PR #{pr_number}",
+        *_base_cmd(), "focus-tab", "--match", f"id:{wid}",
     )
     if rc != 0:
         log.error("Failed to focus tab for PR #%d: %s", pr_number, err)
@@ -89,9 +100,14 @@ async def focus_tab(pr_number: int) -> bool:
 
 
 async def close_tab(pr_number: int) -> bool:
+    tab = await find_pr_tab(pr_number)
+    if tab is None:
+        return True  # already gone
+    wid = _window_id(tab)
+    if wid is None:
+        return False
     rc, _, err = await run_cmd(
-        *_base_cmd(), "close-tab",
-        "--match", f"title:PR #{pr_number}",
+        *_base_cmd(), "close-tab", "--match", f"id:{wid}",
     )
     if rc != 0:
         log.error("Failed to close tab for PR #%d: %s", pr_number, err)
@@ -100,9 +116,14 @@ async def close_tab(pr_number: int) -> bool:
 
 
 async def update_tab_title(pr_number: int, new_title: str) -> bool:
+    tab = await find_pr_tab(pr_number)
+    if tab is None:
+        return False
+    wid = _window_id(tab)
+    if wid is None:
+        return False
     rc, _, err = await run_cmd(
-        *_base_cmd(), "set-tab-title",
-        "--match", f"title:PR #{pr_number}",
+        *_base_cmd(), "set-tab-title", "--match", f"id:{wid}",
         new_title,
     )
     if rc != 0:

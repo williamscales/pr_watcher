@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, DataTable
+from textual.widgets import Footer, Header, Input, DataTable
 from textual.containers import Vertical
 from textual import work
 
@@ -35,6 +36,15 @@ Screen {
     border-top: solid $accent;
     padding: 1 2;
 }
+
+#url-input {
+    dock: bottom;
+    display: none;
+}
+
+#url-input.visible {
+    display: block;
+}
 """
 
 
@@ -42,16 +52,18 @@ class PRWatcherApp(App):
     CSS = APP_CSS
     TITLE = "PR Review Watcher"
     SUB_TITLE = "burstcash/glide"
-
     BINDINGS = [
         Binding("o", "spawn", "Spawn"),
         Binding("f", "focus_tab", "Focus"),
         Binding("enter", "focus_tab", "Focus", show=False),
         Binding("r", "respawn", "Re-spawn"),
         Binding("d", "dismiss", "Dismiss"),
+        Binding("a", "add_pr", "Add PR"),
         Binding("R", "force_refresh", "Refresh", key_display="shift+r"),
         Binding("q", "quit", "Quit"),
     ]
+
+    _URL_RE = re.compile(r"github\.com/burstcash/glide/pull/(\d+)")
 
     def __init__(self) -> None:
         super().__init__()
@@ -63,9 +75,11 @@ class PRWatcherApp(App):
         with Vertical():
             yield PRTable(id="pr-table")
             yield DetailPane(id="detail-pane")
+        yield Input(placeholder="Paste GitHub PR URL or number…", id="url-input")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.theme = "solarized-dark"
         ensure_dirs()
         self.prs = load_state()
         self._refresh_table()
@@ -131,6 +145,50 @@ class PRWatcherApp(App):
 
     def action_force_refresh(self) -> None:
         self._poll_github()
+
+    def action_add_pr(self) -> None:
+        inp = self.query_one("#url-input", Input)
+        if inp.has_class("visible"):
+            inp.remove_class("visible")
+            self.query_one("#pr-table", PRTable).focus()
+        else:
+            inp.value = ""
+            inp.add_class("visible")
+            inp.focus()
+
+    def _parse_pr_number(self, text: str) -> int | None:
+        text = text.strip()
+        if text.isdigit():
+            return int(text)
+        m = self._URL_RE.search(text)
+        return int(m.group(1)) if m else None
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        inp = self.query_one("#url-input", Input)
+        inp.remove_class("visible")
+        self.query_one("#pr-table", PRTable).focus()
+
+        number = self._parse_pr_number(event.value)
+        if number is None:
+            self.notify("Invalid URL — expected a burstcash/glide PR URL or number", severity="error")
+            return
+        if number in self.prs:
+            self.notify(f"PR #{number} is already in the list", severity="warning")
+            return
+        self._fetch_and_spawn(number)
+
+    @work(group="add_pr")
+    async def _fetch_and_spawn(self, number: int) -> None:
+        try:
+            pr = await github.fetch_pr(number)
+        except RuntimeError as e:
+            self.notify(str(e), severity="error")
+            return
+        pr.last_updated = datetime.now()
+        self.prs[pr.number] = pr
+        save_state(self.prs)
+        self._refresh_table()
+        await self._spawn_pr_async(pr)
 
     # --- Workers ---
 

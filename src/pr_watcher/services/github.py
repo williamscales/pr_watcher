@@ -76,6 +76,32 @@ async def check_review_submitted(pr_number: int) -> bool:
     )
 
 
+async def fetch_pr(pr_number: int) -> PR:
+    rc, out, err = await run_cmd(
+        "gh", "pr", "view", str(pr_number),
+        "--repo", "burstcash/glide",
+        "--json", "number,title,author,headRefName,url,body,additions,deletions",
+    )
+    if rc != 0:
+        raise RuntimeError(f"Failed to fetch PR #{pr_number}: {err}")
+
+    try:
+        node = json.loads(out)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse PR #{pr_number}: {e}")
+
+    return PR(
+        number=node["number"],
+        title=node["title"],
+        author=node["author"]["login"],
+        branch=node["headRefName"],
+        url=node["url"],
+        body=node.get("body", ""),
+        additions=node.get("additions", 0),
+        deletions=node.get("deletions", 0),
+    )
+
+
 async def check_pr_state(pr_number: int) -> str:
     rc, out, err = await run_cmd(
         "gh", "pr", "view", str(pr_number),
