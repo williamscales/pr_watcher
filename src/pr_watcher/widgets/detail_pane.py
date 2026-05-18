@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.widgets import Static
 
 from pr_watcher.models import PR, STATUS_ICONS
@@ -18,9 +19,9 @@ class DetailPane(Static):
             body_preview += "\u2026"
 
         self.update(
-            f"[bold]#{pr.number}[/bold] {pr.title}\n"
-            f"Author: {pr.author}  Branch: [cyan]{pr.branch}[/cyan]\n"
+            f"[bold]#{pr.number}[/bold] {escape(pr.title)}\n"
+            f"Author: {escape(pr.author)}  Branch: [cyan]{escape(pr.branch)}[/cyan]\n"
             f"{pr.url}\n"
-            f"+{pr.additions} -{pr.deletions}  {icon} {pr.status.value}\n"
-            f"\n{body_preview}"
+            f"+{pr.additions} -{pr.deletions}  {icon} {escape(pr.status.value)}\n"
+            f"\n{escape(body_preview)}"
         )
