@@ -236,7 +236,7 @@ class PRWatcherApp(App):
         tabs = await kitty.list_tabs()
         changed = False
 
-        for pr in self.prs.values():
+        for pr in list(self.prs.values()):
             if pr.status not in (Status.ACTIVE, Status.IDLE):
                 continue
 
@@ -264,7 +264,7 @@ class PRWatcherApp(App):
     async def _check_review_status(self) -> None:
         changed = False
 
-        for pr in self.prs.values():
+        for pr in list(self.prs.values()):
             if pr.review_submitted:
                 continue
             if pr.status not in (Status.ACTIVE, Status.IDLE):
