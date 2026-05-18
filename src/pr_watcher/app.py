@@ -325,7 +325,7 @@ class PRWatcherApp(App):
         await worktree.remove_worktree(pr)
         remove_prompt(pr)
         await notify.notify("PR Closed", f"PR #{pr.number} was {reason}")
-        pr.status = Status.CLOSED
+        self.prs.pop(pr.number, None)
 
     @work(group="respawn")
     async def _do_respawn(self, pr: PR) -> None:
