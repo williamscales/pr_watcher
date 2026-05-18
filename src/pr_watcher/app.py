@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import webbrowser
 from datetime import datetime
 
 from textual.app import App, ComposeResult
@@ -59,6 +60,7 @@ class PRWatcherApp(App):
         Binding("r", "respawn", "Re-spawn"),
         Binding("d", "dismiss", "Dismiss"),
         Binding("a", "add_pr", "Add PR"),
+        Binding("b", "open_in_browser", "Browser"),
         Binding("R", "force_refresh", "Refresh", key_display="shift+r"),
         Binding("q", "quit", "Quit"),
     ]
@@ -142,6 +144,13 @@ class PRWatcherApp(App):
             self.notify("No PR selected", severity="warning")
             return
         self._do_dismiss(pr)
+
+    def action_open_in_browser(self) -> None:
+        pr = self._get_selected_pr()
+        if pr is None:
+            self.notify("No PR selected", severity="warning")
+            return
+        webbrowser.open(pr.url)
 
     def action_force_refresh(self) -> None:
         self._poll_github()
