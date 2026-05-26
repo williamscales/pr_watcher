@@ -58,6 +58,7 @@ class PRWatcherApp(App):
         Binding("f", "focus_tab", "Focus"),
         Binding("enter", "focus_tab", "Focus", show=False),
         Binding("r", "respawn", "Re-spawn"),
+        Binding("u", "update", "Update"),
         Binding("d", "dismiss", "Dismiss"),
         Binding("a", "add_pr", "Add PR"),
         Binding("b", "open_in_browser", "Browser"),
@@ -71,6 +72,7 @@ class PRWatcherApp(App):
         super().__init__()
         self.prs: dict[int, PR] = {}
         self._spawning: set[int] = set()
+        self._updating: set[int] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -137,6 +139,13 @@ class PRWatcherApp(App):
             self.notify("No PR selected", severity="warning")
             return
         self._do_respawn(pr)
+
+    def action_update(self) -> None:
+        pr = self._get_selected_pr()
+        if pr is None:
+            self.notify("No PR selected", severity="warning")
+            return
+        self._do_update(pr)
 
     def action_dismiss(self) -> None:
         pr = self._get_selected_pr()
@@ -333,6 +342,41 @@ class PRWatcherApp(App):
         await worktree.remove_worktree(pr)
         pr.status = Status.NEW
         await self._spawn_pr_async(pr)
+
+    @work(group="update")
+    async def _do_update(self, pr: PR) -> None:
+        if pr.number in self._updating:
+            return
+        self._updating.add(pr.number)
+        try:
+            state = await github.check_pr_state(pr.number)
+            if state in ("MERGED", "CLOSED"):
+                await self._cleanup_pr(pr, state.lower())
+                save_state(self.prs)
+                self._refresh_table()
+                return
+
+            await kitty.close_tab(pr.number)
+
+            ok = await worktree.update_worktree(pr)
+            if not ok:
+                self.notify(f"Failed to update worktree for PR #{pr.number}", severity="error")
+                return
+
+            try:
+                fresh = await github.fetch_pr(pr.number)
+                pr.title = fresh.title
+                pr.body = fresh.body
+                pr.additions = fresh.additions
+                pr.deletions = fresh.deletions
+            except RuntimeError as e:
+                log.warning("Failed to refetch PR #%d metadata: %s", pr.number, e)
+
+            pr.review_submitted = False
+            pr.last_updated = datetime.now()
+            await self._spawn_pr_async(pr)
+        finally:
+            self._updating.discard(pr.number)
 
     @work(group="dismiss")
     async def _do_dismiss(self, pr: PR) -> None:
