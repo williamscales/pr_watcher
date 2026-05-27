@@ -22,7 +22,7 @@ def _base_cmd() -> list[str]:
 
 
 async def launch_tab(pr: PR) -> bool:
-    shell_cmd = f'{CLAUDE} --dangerously-skip-permissions --effort high --permission-mode plan "$(cat {pr.prompt_path})"; exec zsh'
+    shell_cmd = f'{CLAUDE} --dangerously-skip-permissions --effort xhigh --permission-mode plan "$(cat {pr.prompt_path})"; exec zsh'
     rc, _, err = await run_cmd(
         *_base_cmd(), "launch",
         "--type", "tab",
