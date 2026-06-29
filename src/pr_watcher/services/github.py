@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 
-from pr_watcher.models import PR
+from pr_watcher.models import PR, Notification
 from pr_watcher.services import run_cmd
 
 log = logging.getLogger(__name__)
@@ -112,3 +113,79 @@ async def check_pr_state(pr_number: int) -> str:
         log.error("Failed to check state for PR #%d: %s", pr_number, err)
         return "UNKNOWN"
     return out.strip()
+
+
+# --- Notifications ---
+
+
+def _parse_gh_time(s: str) -> datetime:
+    """Parse a GitHub ISO8601 timestamp (UTC, trailing Z) to naive local time."""
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return dt.astimezone().replace(tzinfo=None)
+
+
+def _notification_from_node(node: dict) -> Notification:
+    subject = node.get("subject") or {}
+    repo = node.get("repository") or {}
+    return Notification(
+        thread_id=str(node["id"]),
+        title=subject.get("title", ""),
+        repo=repo.get("full_name", ""),
+        reason=node.get("reason", ""),
+        subject_type=subject.get("type", ""),
+        subject_api_url=subject.get("url"),
+        repo_url=repo.get("html_url", ""),
+        updated_at=_parse_gh_time(node["updated_at"]),
+        unread=node.get("unread", True),
+    )
+
+
+async def poll_notifications() -> list[Notification]:
+    rc, out, err = await run_cmd(
+        "gh", "api", "--paginate", "repos/burstcash/glide/notifications?all=true",
+    )
+    if rc != 0:
+        log.error("GitHub notifications poll failed: %s", err)
+        raise RuntimeError(f"gh notifications failed: {err}")
+
+    try:
+        nodes = json.loads(out)
+    except json.JSONDecodeError as e:
+        log.error("Failed to parse notifications response: %s", e)
+        raise RuntimeError(f"Failed to parse notifications: {e}")
+
+    return [_notification_from_node(n) for n in nodes]
+
+
+async def mark_notification_read(thread_id: str) -> bool:
+    rc, _, err = await run_cmd(
+        "gh", "api", "-X", "PATCH", f"notifications/threads/{thread_id}",
+    )
+    if rc != 0:
+        log.error("Failed to mark notification %s read: %s", thread_id, err)
+        return False
+    return True
+
+
+async def mark_notification_done(thread_id: str) -> bool:
+    rc, _, err = await run_cmd(
+        "gh", "api", "-X", "DELETE", f"notifications/threads/{thread_id}",
+    )
+    if rc != 0:
+        log.error("Failed to mark notification %s done: %s", thread_id, err)
+        return False
+    return True
+
+
+async def resolve_notification_url(n: Notification) -> str:
+    """Resolve the web URL for a notification, falling back to the repo page."""
+    if n.subject_api_url:
+        rc, out, err = await run_cmd(
+            "gh", "api", n.subject_api_url, "--jq", ".html_url",
+        )
+        if rc == 0:
+            url = out.strip()
+            if url and url != "null":
+                return url
+        log.warning("Failed to resolve html_url for notification %s: %s", n.thread_id, err)
+    return n.repo_url

@@ -96,3 +96,46 @@ class PR:
             spawned_at=datetime.fromisoformat(d["spawned_at"]) if d.get("spawned_at") else None,
             last_updated=datetime.fromisoformat(d["last_updated"]) if d.get("last_updated") else None,
         )
+
+
+@dataclass
+class Notification:
+    thread_id: str
+    title: str
+    repo: str
+    reason: str
+    subject_type: str
+    subject_api_url: str | None
+    repo_url: str
+    updated_at: datetime
+    unread: bool
+    html_url: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "thread_id": self.thread_id,
+            "title": self.title,
+            "repo": self.repo,
+            "reason": self.reason,
+            "subject_type": self.subject_type,
+            "subject_api_url": self.subject_api_url,
+            "repo_url": self.repo_url,
+            "updated_at": self.updated_at.isoformat(),
+            "unread": self.unread,
+            "html_url": self.html_url,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> Notification:
+        return cls(
+            thread_id=d["thread_id"],
+            title=d["title"],
+            repo=d["repo"],
+            reason=d["reason"],
+            subject_type=d["subject_type"],
+            subject_api_url=d.get("subject_api_url"),
+            repo_url=d["repo_url"],
+            updated_at=datetime.fromisoformat(d["updated_at"]),
+            unread=d["unread"],
+            html_url=d.get("html_url"),
+        )

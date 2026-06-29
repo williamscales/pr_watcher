@@ -9,15 +9,25 @@ from datetime import datetime
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Header, Input, DataTable
+from textual.widgets import Footer, Header, Input, DataTable, TabbedContent, TabPane
 from textual.containers import Vertical
 from textual import work
 
-from pr_watcher.models import PR, Status
+from pr_watcher.models import PR, Status, Notification
 from pr_watcher.services import github, kitty, worktree, notify
-from pr_watcher.state import load_state, save_state, write_prompt, remove_prompt, ensure_dirs
+from pr_watcher.state import (
+    load_state,
+    save_state,
+    write_prompt,
+    remove_prompt,
+    ensure_dirs,
+    load_notifications,
+    save_notifications,
+)
 from pr_watcher.widgets.detail_pane import DetailPane
 from pr_watcher.widgets.pr_table import PRTable
+from pr_watcher.widgets.notif_table import NotifTable
+from pr_watcher.widgets.notif_detail import NotifDetail
 
 log = logging.getLogger(__name__)
 
@@ -26,12 +36,16 @@ Screen {
     layout: vertical;
 }
 
-#pr-table {
+TabbedContent {
+    height: 1fr;
+}
+
+#pr-table, #notif-table {
     height: 1fr;
     min-height: 8;
 }
 
-#detail-pane {
+#detail-pane, #notif-detail {
     height: auto;
     max-height: 8;
     border-top: solid $accent;
@@ -54,6 +68,8 @@ class PRWatcherApp(App):
     TITLE = "PR Review Watcher"
     SUB_TITLE = "burstcash/glide"
     BINDINGS = [
+        Binding("1", "show_tab('prs-tab')", "PRs"),
+        Binding("2", "show_tab('notifs-tab')", "Notifs"),
         Binding("o", "spawn", "Spawn"),
         Binding("f", "focus_tab", "Focus"),
         Binding("enter", "focus_tab", "Focus", show=False),
@@ -68,17 +84,29 @@ class PRWatcherApp(App):
 
     _URL_RE = re.compile(r"github\.com/burstcash/glide/pull/(\d+)")
 
+    _PR_TAB_ACTIONS = frozenset(
+        {"spawn", "focus_tab", "respawn", "update", "dismiss", "open_in_browser", "add_pr"}
+    )
+
     def __init__(self) -> None:
         super().__init__()
         self.prs: dict[int, PR] = {}
+        self.notifs: dict[str, Notification] = {}
         self._spawning: set[int] = set()
         self._updating: set[int] = set()
+        self._first_notif_poll = True
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with Vertical():
-            yield PRTable(id="pr-table")
-            yield DetailPane(id="detail-pane")
+        with TabbedContent(initial="prs-tab"):
+            with TabPane("PRs", id="prs-tab"):
+                with Vertical():
+                    yield PRTable(id="pr-table")
+                    yield DetailPane(id="detail-pane")
+            with TabPane("Notifications", id="notifs-tab"):
+                with Vertical():
+                    yield NotifTable(id="notif-table")
+                    yield NotifDetail(id="notif-detail")
         yield Input(placeholder="Paste GitHub PR URL or number…", id="url-input")
         yield Footer()
 
@@ -86,15 +114,21 @@ class PRWatcherApp(App):
         self.theme = "solarized-dark"
         ensure_dirs()
         self.prs = load_state()
+        self.notifs = load_notifications()
         self._refresh_table()
+        self._refresh_notif_table()
 
         # Background polling
         self.set_interval(60, self._poll_github)
         self.set_interval(10, self._check_tab_health)
         self.set_interval(120, self._check_review_status)
+        self.set_interval(30, self._poll_notifications)
 
         # Immediate first poll
         self._poll_github()
+        self._poll_notifications()
+
+        self.query_one("#pr-table", PRTable).focus()
 
     def _get_selected_pr(self) -> PR | None:
         table = self.query_one("#pr-table", PRTable)
@@ -111,12 +145,45 @@ class PRWatcherApp(App):
         table = self.query_one("#pr-table", PRTable)
         table.update_prs(self.prs)
 
+    def _refresh_notif_table(self) -> None:
+        self.query_one("#notif-table", NotifTable).update_notifs(self.notifs)
+
+    def _selected_notif(self) -> Notification | None:
+        tid = self.query_one("#notif-table", NotifTable).selected_id()
+        return self.notifs.get(tid) if tid else None
+
+    def _refresh_notif_detail(self) -> None:
+        self.query_one("#notif-detail", NotifDetail).show_notification(self._selected_notif())
+
+    def _prs_active(self) -> bool:
+        return self.query_one(TabbedContent).active == "prs-tab"
+
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        if self.query_one(TabbedContent).active == "notifs-tab":
+            self.query_one("#notif-table", NotifTable).focus()
+        else:
+            self.query_one("#pr-table", PRTable).focus()
+        self.refresh_bindings()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in self._PR_TAB_ACTIONS and not self._prs_active():
+            return None
+        return True
+
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        if event.row_key and event.row_key.value:
+        if not (event.row_key and event.row_key.value):
+            return
+        if event.data_table.id == "notif-table":
+            n = self.notifs.get(event.row_key.value)
+            self.query_one("#notif-detail", NotifDetail).show_notification(n)
+        else:
             pr = self.prs.get(int(event.row_key.value))
             self.query_one("#detail-pane", DetailPane).show_pr(pr)
 
     # --- Actions ---
+
+    def action_show_tab(self, tab: str) -> None:
+        self.query_one(TabbedContent).active = tab
 
     def action_spawn(self) -> None:
         pr = self._get_selected_pr()
@@ -163,6 +230,7 @@ class PRWatcherApp(App):
 
     def action_force_refresh(self) -> None:
         self._poll_github()
+        self._poll_notifications()
 
     def action_add_pr(self) -> None:
         inp = self.query_one("#url-input", Input)
@@ -392,6 +460,96 @@ class PRWatcherApp(App):
         ok = await kitty.focus_tab(pr.number)
         if not ok:
             self.notify(f"No tab found for PR #{pr.number}", severity="warning")
+
+    # --- Notifications ---
+
+    @work(exclusive=True, group="notif_poll")
+    async def _poll_notifications(self) -> None:
+        try:
+            fresh = await github.poll_notifications()
+        except RuntimeError as e:
+            self.notify(f"GitHub notifications error: {e}", severity="error")
+            return
+
+        fresh_by_id = {n.thread_id: n for n in fresh}
+        new_ids: list[str] = []
+
+        for tid, n in fresh_by_id.items():
+            existing = self.notifs.get(tid)
+            if existing is None:
+                self.notifs[tid] = n
+                new_ids.append(tid)
+            elif n.updated_at > existing.updated_at:
+                # New activity on the thread — adopt the server state afresh.
+                self.notifs[tid] = n
+                if n.unread:
+                    new_ids.append(tid)
+            else:
+                # Unchanged — preserve the local unread override and cached URL.
+                existing.title = n.title
+                existing.reason = n.reason
+                existing.subject_type = n.subject_type
+                existing.subject_api_url = n.subject_api_url
+                existing.repo_url = n.repo_url
+
+        for tid in list(self.notifs):
+            if tid not in fresh_by_id:
+                del self.notifs[tid]
+
+        save_notifications(self.notifs)
+        self._refresh_notif_table()
+        self._refresh_notif_detail()
+
+        if new_ids and not self._first_notif_poll:
+            await self._alert_new_notifications(new_ids)
+        self._first_notif_poll = False
+
+    async def _alert_new_notifications(self, new_ids: list[str]) -> None:
+        if len(new_ids) == 1:
+            n = self.notifs.get(new_ids[0])
+            if n is not None:
+                await notify.notify(
+                    "New GitHub Notification",
+                    f"{n.title[:60]} ({n.reason.replace('_', ' ')})",
+                )
+        else:
+            await notify.notify("New GitHub Notifications", f"{len(new_ids)} new notifications")
+
+    @work(group="notif_open")
+    async def do_notif_open(self, thread_id: str) -> None:
+        n = self.notifs.get(thread_id)
+        if n is None:
+            return
+        if not n.html_url:
+            n.html_url = await github.resolve_notification_url(n)
+        webbrowser.open(n.html_url)
+        if await github.mark_notification_read(thread_id):
+            n.unread = False
+        save_notifications(self.notifs)
+        self._refresh_notif_table()
+        self._refresh_notif_detail()
+
+    def do_notif_unread(self, thread_id: str) -> None:
+        n = self.notifs.get(thread_id)
+        if n is None:
+            return
+        n.unread = True
+        save_notifications(self.notifs)
+        self._refresh_notif_table()
+        self._refresh_notif_detail()
+
+    @work(group="notif_done")
+    async def do_notif_done(self, thread_id: str) -> None:
+        n = self.notifs.get(thread_id)
+        if n is None:
+            return
+        if await github.mark_notification_done(thread_id):
+            self.notifs.pop(thread_id, None)
+            save_notifications(self.notifs)
+            self._refresh_notif_table()
+            self._refresh_notif_detail()
+        else:
+            self.notify("Failed to mark notification done", severity="error")
 
 
 def main() -> None:

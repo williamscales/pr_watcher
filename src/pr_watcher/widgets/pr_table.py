@@ -19,7 +19,7 @@ STATUS_STYLES: dict[Status, str] = {
 }
 
 
-def _format_age(dt: datetime | None) -> str:
+def format_age(dt: datetime | None) -> str:
     if dt is None:
         return "-"
     delta = datetime.now() - dt
@@ -74,7 +74,7 @@ class PRTable(DataTable):
                 short_title,
                 pr.author,
                 status_text,
-                _format_age(pr.spawned_at or pr.last_updated),
+                format_age(pr.spawned_at or pr.last_updated),
                 key=str(pr.number),
             )
 
