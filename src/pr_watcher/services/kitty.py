@@ -37,16 +37,17 @@ async def launch_tab(pr: PR) -> bool:
     return True
 
 
-async def list_tabs() -> list[dict]:
+async def _query_tabs() -> list[dict] | None:
+    """Return kitty tabs, or None if the query failed (distinct from 'no tabs')."""
     rc, out, err = await run_cmd(*_base_cmd(), "ls")
     if rc != 0:
         log.error("Failed to list kitty tabs: %s", err)
-        return []
+        return None
     try:
         os_windows = json.loads(out)
     except json.JSONDecodeError:
         log.error("Failed to parse kitty ls output")
-        return []
+        return None
 
     tabs: list[dict] = []
     for os_win in os_windows:
@@ -59,6 +60,10 @@ async def list_tabs() -> list[dict]:
     return tabs
 
 
+async def list_tabs() -> list[dict]:
+    return (await _query_tabs()) or []
+
+
 async def find_pr_tab(pr_number: int) -> dict | None:
     tabs = await list_tabs()
     marker = f"PR #{pr_number}"
@@ -66,6 +71,38 @@ async def find_pr_tab(pr_number: int) -> dict | None:
         if marker in tab.get("title", ""):
             return tab
     return None
+
+
+async def in_use(pr_number: int) -> bool:
+    """Conservative liveness gate for auto-cleanup.
+
+    True if a tab for this PR is open OR the kitty query failed. We only return
+    False when we can positively confirm no tab exists, so a flaky query can never
+    green-light destroying a worktree that still has a live session in it.
+    """
+    tabs = await _query_tabs()
+    if tabs is None:
+        return True  # couldn't determine — assume in use, never auto-destroy
+    marker = f"PR #{pr_number}"
+    return any(marker in t.get("title", "") for t in tabs)
+
+
+async def live_session_label(pr_number: int) -> str | None:
+    """Describe the session in this PR's tab; None only if we confirm none exists.
+
+    On a failed query we return a label (not None) so callers still prompt before
+    doing anything destructive.
+    """
+    tabs = await _query_tabs()
+    if tabs is None:
+        return "a session that could not be verified (kitty query failed)"
+    marker = f"PR #{pr_number}"
+    tab = next((t for t in tabs if marker in t.get("title", "")), None)
+    if tab is None:
+        return None
+    if is_claude_running(tab):
+        return "a running Claude Code session"
+    return "an open terminal session"
 
 
 def _window_id(tab: dict) -> int | None:

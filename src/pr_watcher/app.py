@@ -28,6 +28,7 @@ from pr_watcher.widgets.detail_pane import DetailPane
 from pr_watcher.widgets.pr_table import PRTable
 from pr_watcher.widgets.notif_table import NotifTable
 from pr_watcher.widgets.notif_detail import NotifDetail
+from pr_watcher.widgets.confirm import ConfirmScreen
 
 log = logging.getLogger(__name__)
 
@@ -303,7 +304,7 @@ class PRWatcherApp(App):
             if num not in new_numbers and pr.status not in (Status.DONE, Status.CLOSED):
                 state = await github.check_pr_state(num)
                 if state in ("MERGED", "CLOSED"):
-                    await self._cleanup_pr(pr, state.lower())
+                    await self._retire_pr(pr, state.lower())
 
         save_state(self.prs)
         self.call_from_thread(self._refresh_table) if not self.is_running else self._refresh_table()
@@ -397,17 +398,78 @@ class PRWatcherApp(App):
         finally:
             self._spawning.discard(pr.number)
 
-    async def _cleanup_pr(self, pr: PR, reason: str) -> None:
-        await kitty.close_tab(pr.number)
-        await worktree.remove_worktree(pr)
-        remove_prompt(pr)
-        await notify.notify("PR Closed", f"PR #{pr.number} was {reason}")
-        self.prs.pop(pr.number, None)
+    async def _retire_pr(self, pr: PR, reason: str) -> None:
+        """A PR merged/closed on GitHub. Never destroy a live/dirty worktree for it."""
+        ws = await worktree.inspect_worktree(pr)
+        tab_open = await kitty.in_use(pr.number)
+
+        # Only auto-remove when there is provably nothing to lose: no open tab,
+        # a clean tree, and nothing unpushed. `in_use` fails closed, so any doubt
+        # about a live session keeps the worktree.
+        if not tab_open and not ws.has_work:
+            await worktree.remove_worktree(pr)  # force=False; safe by construction
+            remove_prompt(pr)
+            self.prs.pop(pr.number, None)
+            await notify.notify(
+                "PR Closed", f"PR #{pr.number} was {reason} — clean worktree removed"
+            )
+            return
+
+        # Something is open or unsaved: keep the tab and worktree exactly as they are.
+        pr.status = Status.DONE if reason == "merged" else Status.CLOSED
+        await kitty.update_tab_title(pr.number, pr.tab_title)
+        await notify.notify(
+            f"PR {reason.capitalize()}",
+            f"PR #{pr.number} was {reason} — press d to dismiss when ready (work preserved)",
+        )
+
+    async def _confirm_destroy(
+        self,
+        pr: PR,
+        ws: worktree.WorkState,
+        session: str | None,
+        *,
+        action: str,
+        consequence: str,
+    ) -> bool:
+        """Prompt before discarding work. Returns True only on explicit confirmation."""
+        at_risk = ws.describe()
+        if session is not None:
+            at_risk.append(session)
+        if not at_risk:
+            return True  # nothing would be lost — no need to interrupt
+
+        items = "\n".join(f"  • {item}" for item in at_risk)
+        message = (
+            f"[bold]{action} PR #{pr.number}?[/bold]\n\n"
+            f"{consequence}\n\n"
+            f"This permanently discards:\n{items}\n\n"
+            f"[dim]y = discard    n / Esc = keep[/dim]"
+        )
+        return await self.push_screen_wait(ConfirmScreen(message))
 
     @work(group="respawn")
     async def _do_respawn(self, pr: PR) -> None:
+        ws = await worktree.inspect_worktree(pr)
+        session = await kitty.live_session_label(pr.number)
+        confirmed = False
+        if ws.has_work or session is not None:
+            confirmed = await self._confirm_destroy(
+                pr, ws, session,
+                action="Re-spawn",
+                consequence="The worktree will be rebuilt from origin and the session restarted.",
+            )
+            if not confirmed:
+                return
+
         await kitty.close_tab(pr.number)
-        await worktree.remove_worktree(pr)
+        outcome = await worktree.remove_worktree(pr, force=confirmed)
+        if outcome is not worktree.RemoveOutcome.REMOVED:
+            self.notify(
+                f"Re-spawn aborted — worktree for PR #{pr.number} kept (see log)",
+                severity="warning",
+            )
+            return
         pr.status = Status.NEW
         await self._spawn_pr_async(pr)
 
@@ -419,16 +481,31 @@ class PRWatcherApp(App):
         try:
             state = await github.check_pr_state(pr.number)
             if state in ("MERGED", "CLOSED"):
-                await self._cleanup_pr(pr, state.lower())
+                await self._retire_pr(pr, state.lower())
                 save_state(self.prs)
                 self._refresh_table()
                 return
 
+            ws = await worktree.inspect_worktree(pr)
+            session = await kitty.live_session_label(pr.number)
+            confirmed = False
+            if ws.has_work or session is not None:
+                confirmed = await self._confirm_destroy(
+                    pr, ws, session,
+                    action="Update",
+                    consequence="The worktree will be reset to origin and the session restarted.",
+                )
+                if not confirmed:
+                    return
+
             await kitty.close_tab(pr.number)
 
-            ok = await worktree.update_worktree(pr)
+            ok = await worktree.update_worktree(pr, force=confirmed)
             if not ok:
-                self.notify(f"Failed to update worktree for PR #{pr.number}", severity="error")
+                self.notify(
+                    f"Update aborted — worktree for PR #{pr.number} kept (see log)",
+                    severity="warning",
+                )
                 return
 
             try:
@@ -448,8 +525,25 @@ class PRWatcherApp(App):
 
     @work(group="dismiss")
     async def _do_dismiss(self, pr: PR) -> None:
+        ws = await worktree.inspect_worktree(pr)
+        session = await kitty.live_session_label(pr.number)
+        confirmed = False
+        if ws.has_work or session is not None:
+            confirmed = await self._confirm_destroy(
+                pr, ws, session,
+                action="Dismiss",
+                consequence="The worktree and its tab will be removed.",
+            )
+            if not confirmed:
+                return
+
         await kitty.close_tab(pr.number)
-        await worktree.remove_worktree(pr)
+        outcome = await worktree.remove_worktree(pr, force=confirmed)
+        if outcome is not worktree.RemoveOutcome.REMOVED:
+            self.notify(
+                f"Worktree for PR #{pr.number} was kept (see log)", severity="warning"
+            )
+            return
         remove_prompt(pr)
         self.prs.pop(pr.number, None)
         save_state(self.prs)
