@@ -72,6 +72,7 @@ class PRWatcherApp(App):
         Binding("1", "show_tab('prs-tab')", "PRs"),
         Binding("2", "show_tab('notifs-tab')", "Notifs"),
         Binding("o", "spawn", "Spawn"),
+        Binding("c", "continue_session", "Continue"),
         Binding("f", "focus_tab", "Focus"),
         Binding("enter", "focus_tab", "Focus", show=False),
         Binding("r", "respawn", "Re-spawn"),
@@ -86,7 +87,16 @@ class PRWatcherApp(App):
     _URL_RE = re.compile(r"github\.com/burstcash/glide/pull/(\d+)")
 
     _PR_TAB_ACTIONS = frozenset(
-        {"spawn", "focus_tab", "respawn", "update", "dismiss", "open_in_browser", "add_pr"}
+        {
+            "spawn",
+            "continue_session",
+            "focus_tab",
+            "respawn",
+            "update",
+            "dismiss",
+            "open_in_browser",
+            "add_pr",
+        }
     )
 
     def __init__(self) -> None:
@@ -95,6 +105,7 @@ class PRWatcherApp(App):
         self.notifs: dict[str, Notification] = {}
         self._spawning: set[int] = set()
         self._updating: set[int] = set()
+        self._continuing: set[int] = set()
         self._first_notif_poll = True
 
     def compose(self) -> ComposeResult:
@@ -195,6 +206,13 @@ class PRWatcherApp(App):
             self._do_focus_tab(pr)
             return
         self._spawn_pr(pr)
+
+    def action_continue_session(self) -> None:
+        pr = self._get_selected_pr()
+        if pr is None:
+            self.notify("No PR selected", severity="warning")
+            return
+        self._do_continue(pr)
 
     def action_focus_tab(self) -> None:
         pr = self._get_selected_pr()
@@ -548,6 +566,42 @@ class PRWatcherApp(App):
         self.prs.pop(pr.number, None)
         save_state(self.prs)
         self._refresh_table()
+
+    @work(group="continue")
+    async def _do_continue(self, pr: PR) -> None:
+        # Key repeat fires faster than the kitty round-trip below; without this guard
+        # two presses each see "no tab" and launch a duplicate.
+        if pr.number in self._continuing:
+            return
+        self._continuing.add(pr.number)
+        try:
+            if not worktree.worktree_exists(pr):
+                self.notify(
+                    f"No worktree for PR #{pr.number} — press o to spawn", severity="warning"
+                )
+                return
+            if not kitty.has_prior_session(pr):
+                self.notify(
+                    f"No prior Claude session in the worktree for PR #{pr.number}",
+                    severity="warning",
+                )
+                return
+
+            outcome = await kitty.continue_session(pr)
+            if outcome is kitty.ContinueOutcome.ERROR:
+                self.notify(f"Failed to continue session for PR #{pr.number}", severity="error")
+                return
+            if outcome is kitty.ContinueOutcome.BUSY:
+                self.notify(f"PR #{pr.number}'s tab is busy — focused it instead")
+                return
+
+            # Leave DONE / CLOSED / REVIEW_SUBMITTED alone — nothing would restore them.
+            if pr.status in (Status.IDLE, Status.NEW):
+                pr.status = Status.ACTIVE
+                save_state(self.prs)
+                self._refresh_table()
+        finally:
+            self._continuing.discard(pr.number)
 
     @work(group="focus")
     async def _do_focus_tab(self, pr: PR) -> None:

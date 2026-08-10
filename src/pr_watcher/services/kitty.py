@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+from enum import Enum
+from pathlib import Path
 
 from pr_watcher.models import PR
 from pr_watcher.services import run_cmd
@@ -11,6 +13,15 @@ log = logging.getLogger(__name__)
 
 KITTEN = "/Applications/kitty.app/Contents/MacOS/kitten"
 CLAUDE = os.path.expanduser("~/.local/bin/claude")
+CLAUDE_FLAGS = "--dangerously-skip-permissions --model opus --effort high"
+SHELL_NAMES = frozenset({"zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh"})
+
+
+class ContinueOutcome(Enum):
+    LAUNCHED = "launched"  # new tab opened running claude --continue
+    RESUMED = "resumed"  # typed into the PR's existing tab, which sat at a shell
+    BUSY = "busy"  # tab is running something; focused it instead of typing over it
+    ERROR = "error"
 
 
 def _base_cmd() -> list[str]:
@@ -21,20 +32,99 @@ def _base_cmd() -> list[str]:
     return [KITTEN, "@"]
 
 
-async def launch_tab(pr: PR) -> bool:
-    shell_cmd = f'{CLAUDE} --dangerously-skip-permissions --effort high --permission-mode plan "$(cat {pr.prompt_path})"; exec zsh'
+async def _launch_tab(pr: PR, shell_cmd: str, *, take_focus: bool) -> bool:
+    focus_args: list[str] = []
+    if not take_focus:
+        focus_args.append("--dont-take-focus")
     rc, _, err = await run_cmd(
         *_base_cmd(), "launch",
         "--type", "tab",
         "--tab-title", pr.tab_title,
         "--cwd", pr.worktree_path_expanded,
-        "--dont-take-focus",
+        *focus_args,
         "--", "zsh", "-l", "-c", shell_cmd,
     )
     if rc != 0:
         log.error("Failed to launch kitty tab for PR #%d: %s", pr.number, err)
         return False
     return True
+
+
+async def launch_tab(pr: PR) -> bool:
+    shell_cmd = (
+        f'{CLAUDE} {CLAUDE_FLAGS} --permission-mode plan "$(cat {pr.prompt_path})"; exec zsh'
+    )
+    return await _launch_tab(pr, shell_cmd, take_focus=False)
+
+
+async def launch_continue_tab(pr: PR) -> bool:
+    """Open a tab resuming the worktree's most recent Claude session."""
+    return await _launch_tab(pr, f"{CLAUDE} {CLAUDE_FLAGS} --continue; exec zsh", take_focus=True)
+
+
+def _at_shell(window: dict) -> bool:
+    """True when nothing but the window's own shell is in the foreground.
+
+    An interactive shell reports a bare cmdline; anything with arguments is a shell
+    running a script, which is a foreground program like any other.
+    """
+    procs = window.get("foreground_processes", [])
+    if not procs:
+        return False
+    for proc in procs:
+        cmdline = proc.get("cmdline", [])
+        if len(cmdline) != 1:
+            return False
+        if os.path.basename(cmdline[0]).lstrip("-") not in SHELL_NAMES:
+            return False
+    return True
+
+
+async def continue_session(pr: PR) -> ContinueOutcome:
+    """Resume the worktree's last Claude session, reusing the PR's tab if it has one."""
+    tabs = await _query_tabs()
+    if tabs is None:
+        return ContinueOutcome.ERROR
+
+    marker = f"PR #{pr.number}"
+    tab = next((t for t in tabs if marker in t.get("title", "")), None)
+    if tab is None:
+        if await launch_continue_tab(pr):
+            return ContinueOutcome.LAUNCHED
+        return ContinueOutcome.ERROR
+
+    wid = _window_id(tab)
+    if wid is None:
+        return ContinueOutcome.ERROR
+
+    # Typing into a window that is running something would corrupt that program's input.
+    idle = next((w for w in tab.get("windows", []) if _at_shell(w)), None)
+    if is_claude_running(tab) or idle is None:
+        await _focus_window(wid)
+        return ContinueOutcome.BUSY
+
+    # Leading ^C clears anything half-typed at the prompt, which would otherwise
+    # be run as one mangled command with what we send.
+    rc, _, err = await run_cmd(
+        *_base_cmd(), "send-text", "--match", f"id:{idle['id']}",
+        f"\x03{CLAUDE} {CLAUDE_FLAGS} --continue\r",
+    )
+    if rc != 0:
+        log.error("Failed to send continue command for PR #%d: %s", pr.number, err)
+        return ContinueOutcome.ERROR
+
+    await _focus_window(idle["id"])
+    return ContinueOutcome.RESUMED
+
+
+def session_dir(pr: PR) -> Path:
+    """Where Claude Code stores conversations for this worktree."""
+    slug = pr.worktree_path_expanded.replace("/", "-").replace(".", "-")
+    return Path(os.path.expanduser("~/.claude/projects")) / slug
+
+
+def has_prior_session(pr: PR) -> bool:
+    return any(session_dir(pr).glob("*.jsonl"))
 
 
 async def _query_tabs() -> list[dict] | None:
@@ -107,7 +197,18 @@ async def live_session_label(pr_number: int) -> str | None:
 
 def _window_id(tab: dict) -> int | None:
     windows = tab.get("windows", [])
-    return windows[0]["id"] if windows else None
+    if not windows:
+        return None
+    return windows[0]["id"]
+
+
+def _tab_match(window_id: int) -> str:
+    """Match the tab holding this window.
+
+    `id:` would be read as a tab id first and only fall back to window ids, so it
+    can select an unrelated tab that happens to carry that number.
+    """
+    return f"window_id:{window_id}"
 
 
 def is_claude_running(tab: dict) -> bool:
@@ -119,6 +220,16 @@ def is_claude_running(tab: dict) -> bool:
     return False
 
 
+async def _focus_window(window_id: int) -> bool:
+    rc, _, err = await run_cmd(
+        *_base_cmd(), "focus-window", "--match", f"id:{window_id}",
+    )
+    if rc != 0:
+        log.error("Failed to focus kitty window %d: %s", window_id, err)
+        return False
+    return True
+
+
 async def focus_tab(pr_number: int) -> bool:
     tab = await find_pr_tab(pr_number)
     if tab is None:
@@ -128,7 +239,7 @@ async def focus_tab(pr_number: int) -> bool:
     if wid is None:
         return False
     rc, _, err = await run_cmd(
-        *_base_cmd(), "focus-tab", "--match", f"id:{wid}",
+        *_base_cmd(), "focus-tab", "--match", _tab_match(wid),
     )
     if rc != 0:
         log.error("Failed to focus tab for PR #%d: %s", pr_number, err)
@@ -144,7 +255,7 @@ async def close_tab(pr_number: int) -> bool:
     if wid is None:
         return False
     rc, _, err = await run_cmd(
-        *_base_cmd(), "close-tab", "--match", f"id:{wid}",
+        *_base_cmd(), "close-tab", "--match", _tab_match(wid),
     )
     if rc != 0:
         log.error("Failed to close tab for PR #%d: %s", pr_number, err)
@@ -160,7 +271,7 @@ async def update_tab_title(pr_number: int, new_title: str) -> bool:
     if wid is None:
         return False
     rc, _, err = await run_cmd(
-        *_base_cmd(), "set-tab-title", "--match", f"id:{wid}",
+        *_base_cmd(), "set-tab-title", "--match", _tab_match(wid),
         new_title,
     )
     if rc != 0:

@@ -55,6 +55,7 @@ Global: `1` / `2` switch tabs, `j` / `k` move the cursor, `Shift+R` force-refres
 | Key | Action |
 |-----|--------|
 | `o` | Spawn a Claude Code review session for the selected PR (focuses its tab if already active) |
+| `c` | Continue — resume the worktree's most recent Claude session (`claude --continue`), in the PR's existing tab if it has one sitting at a shell, otherwise in a new tab |
 | `f` / `Enter` | Focus the kitty tab for the selected PR |
 | `r` | Re-spawn — close and restart the review session |
 | `u` | Update — sync the worktree to the latest PR head and re-spawn |
