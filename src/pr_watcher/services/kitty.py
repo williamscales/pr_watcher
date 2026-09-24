@@ -86,7 +86,7 @@ async def continue_session(pr: PR) -> ContinueOutcome:
     if tabs is None:
         return ContinueOutcome.ERROR
 
-    marker = f"PR #{pr.number}"
+    marker = f"#{pr.number}:"
     tab = next((t for t in tabs if marker in t.get("title", "")), None)
     if tab is None:
         if await launch_continue_tab(pr):
@@ -156,7 +156,7 @@ async def list_tabs() -> list[dict]:
 
 async def find_pr_tab(pr_number: int) -> dict | None:
     tabs = await list_tabs()
-    marker = f"PR #{pr_number}"
+    marker = f"#{pr_number}:"
     for tab in tabs:
         if marker in tab.get("title", ""):
             return tab
@@ -173,7 +173,7 @@ async def in_use(pr_number: int) -> bool:
     tabs = await _query_tabs()
     if tabs is None:
         return True  # couldn't determine — assume in use, never auto-destroy
-    marker = f"PR #{pr_number}"
+    marker = f"#{pr_number}:"
     return any(marker in t.get("title", "") for t in tabs)
 
 
@@ -186,7 +186,7 @@ async def live_session_label(pr_number: int) -> str | None:
     tabs = await _query_tabs()
     if tabs is None:
         return "a session that could not be verified (kitty query failed)"
-    marker = f"PR #{pr_number}"
+    marker = f"#{pr_number}:"
     tab = next((t for t in tabs if marker in t.get("title", "")), None)
     if tab is None:
         return None

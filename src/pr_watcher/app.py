@@ -336,7 +336,7 @@ class PRWatcherApp(App):
             if pr.status not in (Status.ACTIVE, Status.IDLE):
                 continue
 
-            marker = f"PR #{pr.number}"
+            marker = f"#{pr.number}:"
             tab = next((t for t in tabs if marker in t.get("title", "")), None)
 
             if tab is None:

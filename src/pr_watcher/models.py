@@ -58,7 +58,7 @@ class PR:
     def tab_title(self) -> str:
         icon = STATUS_ICONS.get(self.status, "?")
         short = self.title[:40] + ("\u2026" if len(self.title) > 40 else "")
-        return f"{icon} PR #{self.number}: {short}"
+        return f"{icon} #{self.number}: {short}"
 
     @property
     def state_key(self) -> str:
